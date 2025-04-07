@@ -1,0 +1,899 @@
+---
+title: "Análisis de datos de Twitch"
+author: "Víctor López Martínez"
+date: "2024-03-13"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+Twitch es una de las plataformas de retransmisión en directo más importantes de Internet. Entre 2019 y 2020 la plataforma sufrió un importante crecimiento debido al decrecimiento de plataformas competidoras como Mixer y a otros acontecimientos como la pandemia de Covid-19 y el consiguiente confinamiento en gran parte del mundo. Esto último provocaría que el principal medio de entretenimiento se encontrara en Internet y especialmente en aquellos sitios que emitían contenido de su interés prácticamente las 24 horas del día.
+
+El fichero `twitchdata-update.csv` contiene un set de datos con 11 columnas en las que se registraron datos de los 1000 canales más exitosos de Twitch entre 2019 y 2020. A partir de él vamos a tratar de averiguar cuales son las características o variables más preponderantes a la hora de determinar cuales son los canales más exitosos, cuales son los que destacan en distintos aspectos (picos de audiencia, aumento de seguidores, etc). Para ello, se aplicarán distintas técnicas estadística multivariante que nos van a permitir reducir la dimensionalidad de las variables, hacer agrupaciones y averiguar las tendencias que siguen los datos.
+
+# Análisis previo
+
+```{r warning=FALSE, include=FALSE}
+library(readr)
+d <- read_csv("../data/twitchdata-update.csv")
+df <- d
+```
+
+En primer lugar haremos un breve repaso de lo que representa cada variable:
+
+-   **Channel**: Nombre del canal de Twitch (chr)
+
+-   **Watch time (minutes)**: Suma de los minutos de visualización del canal entre todos los usuarios durante un año (num).
+
+-   **Stream time (minutes)**: Registro del tiempo (en minutos) que el canal ha estado emitiendo contenido durante ese año (num)
+
+-   **Peak viewers**: Máxima cantidad de espectadores en directo (num)
+
+-   **Average viewers**: Media de espectadores en directo del canal (num)
+
+-   **Followers**: Número de seguidores del canal al final del año (num)
+
+-   **Followers gained**: Seguidores ganados durante ese año (num)
+
+-   **Views gained**: Número de visitas durante ese año (num)
+
+-   **Partnered**: Si el canal es socio de Twitch, es decir, si cumple unos requisitos mínimos de horas en directo, mínimo de días diferentes que ha estado retransmitiendo o si mantiene una media mínima de espectadores (bool)
+
+-   **Mature**: Si el contenido del canal es solo apto para adultos (bool)
+
+-   **Language**: Idioma del canal (bool)
+
+```{r echo=FALSE}
+summary(d) # Resumen
+```
+
+Como punto de partida, realizaremos un estudio inicial para comprender cuál es el comportamiento de los datos del dataset, el tipo de datos que almacenan y su rango de valores.
+
+```{r boxplot, echo=FALSE, fig.width=15, fig.height=7}
+boxplot(d[,2:7]) # Gráfico caja bigotes
+```
+
+Observamos como las varianzas son distintas en cada variable numérica y con escalas muy diferentes. Teniendo rangos de valores tan dispares en cada columna, podría ser interesante escalarlos a la hora de aplicar ciertas técnicas de clasificación.
+
+```{r md_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.width=6, fig.height=4}
+library(tidyverse)
+library(hrbrthemes)
+
+mu <- colMeans(d[,2:7]) # Vector de medias
+V <- cov(d[,2:7]) # Matriz de covarianzas
+
+md<-mahalanobis(d[,2:7], mu, V) # Distancia de Mahalanobis
+d <- data.frame(d, md)
+
+ggplot(d, aes(x = 1:nrow(d), y = md)) +
+  geom_point(shape = 20) +
+  geom_abline(slope = 0, intercept = 60, color = "red", linetype = "dashed") +
+  labs(x = "Index", y = "Dist. Mahalanobis")
+  
+
+```
+
+Usando las columnas numéricas podemos calcular las distancias de Mahalanobis y ver cual es el canal de Twitch con las estadísticas más raras. En este caso `dota2ti` tiene los datos más alejados de la media. Se trata de un canal que retransmite directos esporádicos de torneos del videojuego Dota 2 que tienen mucho éxito a pesar de la poca actividad en la plataforma (lo que explica su rarez).
+
+```{r md_max, echo=FALSE}
+d[which.max(md),1] # el más raro
+```
+
+Con el gráfico de distancias de Mahalanobis podríamos identificar los datos atípicos para poder ser eliminados de modo que no obstaculicen el análisis del resto. Por ejemplo, podríamos proponer eliminar todas aquellas observaciones con una distancia mayor a 60. Con este filtro se eliminarían 13 observaciones (teniendo en cuenta que partimos de 1000 observaciones).
+
+```{r echo=FALSE}
+d <- subset(d, md<=60)
+
+d$Language_mod <- ifelse(d$Language %in% c("Spanish"), 
+                         d$Language, "Other Languages")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE, , fig.width=7, fig.height=4}
+p <- ggplot(d, aes(x=Stream.time.minutes., y=Average.viewers))
+p + 
+  geom_point(shape = 20) + geom_smooth()
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=7, fig.height=4}
+p <- ggplot(d, aes(x=Followers, y=Followers.gained, col=Language_mod))
+p + 
+  geom_point(shape = 17) +
+  geom_hline(yintercept = 0, color = "purple", linetype = "dashed", size = 0.8,
+             alpha = 0.7)+  
+  geom_abline(intercept = 0, slope = 1, color = "purple", linetype = "dashed", 
+              size=0.8, alpha = 0.7)
+
+```
+
+Las nubes de puntos nos pueden ayudar a apreciar como se comportan las variables al enfrentarlas con el resto. De aquí se sacan conclusiones como que existe una tendencia de los datos a decrecer la media de espectadores del canal según va aumentando las horas de retransmisión que acumula o la relación positiva entre los seguidores del canal a final del año y el aumento de esta cifra durante este mismo periodo.
+
+Nótese de este último gráfico la forma de punta de flecha que tiene la nube de puntos. La envolvente inferior que acota los puntos sería la recta horizontal que pasa por el origen. Los puntos cercanos a esta recta serán aquellos canales que obtienen peor proporción de seguidores ganados respectos sus seguidores finales. En cambio, los puntos cercanos a la envolvente superior serán aquellos que mejor rendimiento han conseguido (la mayoría de canales hispanohablantes se encuentran cerca de esta recta). Queda decir que la ecuación de esta envolvente sería $y = x$ (bisectriz del primer cuadrante), ya que no es posible que un canal obtenga una cifra mayor de seguidores de seguidores ganados durante el año que la de seguidores con la que finaliza. Por ende, los canales que se encuentren sobre la recta serán los que iniciaron este año con 0 seguidores.
+
+*OBSERVACIÓN: Las ganancias de seguidores también pueden ser negativas porque hayan perdido más seguidores.*
+
+```{r corrplot, echo=FALSE, message=FALSE, warning=FALSE, fig.width=5, fig.height=4}
+library(corrplot)
+
+R <- cor(d[,2:7])
+corrplot.mixed(R, upper = 'ellipse', order = 'AOE', tl.cex = 0.6)
+```
+
+Ahora usando la matriz de correlaciones podemos llegar a la conclusión de que existe una relación inversamente proporcional entre el tiempo de retransmisión de un canal y el resto de las variables (salvo para el tiempo de visualización de su canal, con el que tiene una correlación prácticamente nula (serían variables independientes).
+
+# Análisis de Componentes Principales
+
+Nuestra primera decisión para calcular las componentes principales será si usar la matriz de covarianzas o la matriz de correlaciones. Como hemos apreciado en el análisis previo, parece ser que las variables tienen rangos muy diferentes, por lo que optaremos por la segunda opción.
+
+```{r include=FALSE}
+PCA<-princomp(d[,2:7],cor=TRUE)
+summary(PCA,loadings=TRUE)
+importance <- data.frame('Stan. dev' = PCA$sdev)
+lambda <- PCA$sdev^2
+traza <- sum(lambda)
+prop_var <- lambda/traza
+cum_prop <- cumsum(prop_var)
+importance <- data.frame('Stan. dev' = PCA$sdev,
+                         'Var' = lambda,
+                         'Prop. Var.' = prop_var,
+                         'Cum. Prop' = cum_prop)
+importance <- t(importance)
+```
+
+```{r echo=FALSE}
+knitr::kable(importance)
+```
+
+Para decidir el número de componentes vamos a emplear la **regla de Rao**, de modo que solo nos quedaremos con aquellas componentes que tengan una varianza o valor propio mayor que la variabilidad mínima de las variables originales. Puesto que estamos usando variables estandarizadas, nos quedaremos con aquellas componentes que tengan un valor propio (o varianza) $\lambda \geq 1$. Siguiendo este criterio nos quedamos con las 2 primeras componentes principales.
+
+```{r echo=FALSE}
+L <- PCA$loadings
+
+cargas <- data.frame(Comp.1 = L[,1],
+                     Comp.2 = L[,2])
+
+knitr::kable(cargas, caption = "Cargas en cada componente")
+```
+
+Analizando el valor de las cargas para la primera componente, las variables que más influyen son `Average.viewers`, `Followers`, `Watch.time.Minutes`, `Followers.Gained` y `Peak.Viewers` (influyen positivamente todas de una forma positiva). Por lo tanto, $Y_{1}$ nos indicará lo exitoso que es el canal.
+
+Para la segunda componente, las cargas nos indican que `Stream.time.minutes` y `Watch.time.Minutes` son las variables que más influyen. Por ello, esta componente podría indicar el compromiso que hay entre el propio streamer y su audiencia (si el canal acumula mucho tiempo en directo y sus espectadores acumulan mucho tiempo viéndolo, entonces hay compromiso). Los canales que tengan valores grandes en $Y_{2}$ serán por lo general canales que llevan tiempo en la plataforma y que han consolidado una comunidad de Twitch comprometida con el canal.
+
+```{r echo=FALSE, fig.width=7, fig.height=4}
+S <- PCA$scores
+d$S1 <- S[,1]
+d$S2 <- S[,2]
+
+p <- ggplot(data = d, aes(x=S1, y=S2, col=Language_mod))
+p + geom_point(shape=20, size=2)
+
+```
+
+Si representamos en un diagrama de dispersión las puntuaciones de las dos primeras componentes, podemos ver una gran nube de puntos aglutinada entorno al origen (0,0). En la parte superior izquierda del gráfico podríamos encontrar un grupo relativamente denso y lejano del resto de puntos. Por su ubicación en el gráfico diremos que se trata de un grupo de canales no muy exitosos que destaca por el número de minutos retransmitidos en la plataforma y los minutos que acumulan sus espectadores (canales con una comunidad consolidada). A la derecha del gráfico los puntos se encuentran mucho más dispersos y corresponderán a los canales que tienen mayor éxito en Twitch.
+
+Usando la matriz de saturaciones podemos calcular como de bien están representadas las variables originales en cada componente:
+
+```{r echo=FALSE}
+SAT <- cor(d[,2:7], S)
+knitr::kable(SAT, caption = "Matriz de saturaciones")
+```
+
+Vemos como la variable que mejor queda representada con la primera componente es `Avarage.Viewers`, mientras que `Stream.time.minutes` es la que peor representada queda (se obtiene muy poca información de ella con $Y_{1}$). Con la segunda componente conseguimos representar mucho mejor `Avarage.Viewers` que con la primera componente.
+
+Sin embargo, lo que nos interesa saber es cuanta información de cada variable se conserva con la representación de las dos primeras componentes principales. Tendremos que calcular las **comunalidades**:
+
+```{r echo=FALSE}
+COM2<-SAT[,1]^2+ SAT[,2]^2
+COM2
+
+comunalidades <- data.frame(Comp.1 = SAT[,1]^2,
+           Comp.2 = SAT[,2]^2,
+           Comunalidad = COM2)
+
+knitr::kable(comunalidades, caption = "Comunalidades")
+```
+
+Por un lado tenemos que la variable de la que menos información se pierde es `Avarage.Viewers`, que conserva un 94.8 % de la información. No obstante, en otras variables como `Peak.viewers` y `Followers.gained` permanece menos de un 60 % de la información.
+
+# Análisis de cluster
+
+Anteriormente, haciendo PCA hemos podido apreciar visualmente en el gráfico de las dos primeras componentes la presencia de un grupo denso y aislado del resto. No obstante, podríamos encontrar más grupos con una serie de características muy concretas, por lo que vamos a optar por hacer un análisis de cluster. Para ello vamos a estandarizar las variables.
+
+```{r}
+set.seed(4444)
+ds <- as.data.frame(scale(d[,2:7]))
+```
+
+## K-means
+
+Primero lo haremos con K-means, por lo que tendremos que decidir el número de centroides. Consideraremos múltiples criterios para ello y el $k$ más propuesto será el que elegiremos:
+
+```{r echo=FALSE}
+library(NbClust)
+NbClust(ds,method='complete',index='all')$Best.nc
+```
+
+Según esta regla elegiríamos $k = 2$ aunque hay cuatro métodos que recomiendan $k = 6$. También podemos hacer esta elección por el método gráfico. Si analizamos las gráficas de índices Hubert, encontraríamos el codo en $k = 3$ por lo que podríamos elegir $k = 2$.
+
+Probaremos primero K-means con $k = 2$
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=7, fig.height=4}
+library(cluster)
+k<-2
+CA1<-kmeans(ds,centers=2,nstar=10)
+
+Y2G<-CA1$cluster
+d$Y<-Y2G
+
+p <- ggplot(data = d, aes(x=S1, y=S2, col=factor(Y)))
+p + geom_point(shape=20, size=2) +
+  labs(color = "Clusters")
+
+
+# clusplot(ds,CA1$cluster,color=T,shade=T,cex=0.5,lines=0)
+```
+
+Aquí obtenemos un grupo a la izquierda y otro a la derecha del gráfico de las dos primeras componentes principales. Parece que los puntos se distinguen en cada cluster por su puntuación en la primera componente. El grupo de la izquierda son los canales con menor puntuación en la primera componente, es decir, los canales menos exitosos. Al contrario, los puntos del cluster de la derecha son los que tienen mejor puntuación en esta componente, es decir, son los canales más exitosos. En resumen, esta agrupación en dos cluster distinguiría los canales entre los exitosos y los que no.
+
+Como parece que todavía hay mucha varianza entre los grupos, vamos a probar a aumentar el valor de $k$ a 4.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=6, fig.height=3.5}
+k<-2
+CA1<-kmeans(ds,centers=4,nstar=10)
+
+Y4G<-CA1$cluster
+d$Y<-Y4G
+
+p <- ggplot(data = d, aes(x=S1, y=S2, col=factor(Y)))
+p + geom_point(shape=20, size=2) +
+  labs(color = "Clusters")
+
+
+clusplot(ds,CA1$cluster,color=T,shade=T,cex=0.5,lines=0)
+```
+
+Esta distribución de los cuatro grupos parece más interesante de analizar. Para empezar, cabe señalar que el **Cluster 4** se correspondería con el grupo que habíamos identificado previamente en el PCA, por lo que los canales perteneciente a este cluster serán aquellos que no son exitosos pero que acumulan una buena cantidad de minutos en la plataforma y tienen seguidores que consumen bastante su contenido (comunidades grandes).
+
+Por otro lado, debajo de este cluster, encontraríamos en el **Cluster 2** aquellos canales que ni son existosos ni tienen una gran trayectoria en la plataforma. Podríamos atrevernos a decir que estos son los canales más novatos en las plataforma.
+
+En el **Cluster 1**, a la derecha del cluster mencionado anteriormente, estarían los canales que tendrían un éxito notable (todos toman valores positivos en las puntuaciones de la primera componente).
+
+Aún así, si queremos hablar de aquellos canales que son sin lugar a dudas los más importantes y exitosos en la plataforma, tenemos que referirnos a aquellos que pertenecen al **Cluster 3**, porque son los que obtienen una puntuación significativamente alta con la primera componente.
+
+Respecto a lo anterior nos preguntamos si hay algún streamer de habla hispana en el cluster de canales exitosos.
+
+**LISTADO DE STREAMERS HISPANOHABLANTES MÁS EXITOSOS**
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+d1 <- cbind(d, Y4G)
+indices <- which(d1[, "Y4G"] == 3 & d1[, "Language"] == "Spanish")
+d[indices, 1]
+```
+
+## Análisis cluster jerarquizado
+
+En esta ocasión nos basaremos en un dendograma para analizar los grupos que se van formando locálmente (por su proximidad a sus vecinos). Para ello, primero calcularemos la matriz de distancias (usaremos la distancia euclidea).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+D <- dist(ds, method = 'euclidean')
+M<-as.matrix(D)[1:987,1:987]
+heatmap(M)
+```
+
+Empezaremos haciendo CA jerarquizado formando dos grupos para averiguar si se parecen a los formados por el algoritmo de K-means:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=7, fig.height=4}
+CA2<- hclust(D,method='complete')
+grupos_2<- cutree(CA2, k=2)
+d <- data.frame(d, grupos_2)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+p <- ggplot(data = d, aes(x=S1, y=S2, col=factor(grupos_2)))
+p + geom_point(shape=20, size=2) +
+  labs(color = "Clusters")
+```
+
+Como resultado obtenemos que `r sum(Y2G==grupos_2)` canales clasifican igual con los dos algoritmos. La principal diferencia de agrupación es que bastantes canales que eran clasificados en el cluster 1 en K-means (como exitosos) ahora son clasificados en el cluster 2 (como no exitosos). Sin embargo, esta distribución de los grupos no aporta mucha separabilidad en un gráfico donde se representan las dos primeras componentes, por lo que no sería muy riguroso etiquetar los clusters como exitosos y no exitosos.
+
+A continuación, podaremos el dendograma en k=4 (grupos que se forman a esa distancia euclídea) y comprobaremos la forma que tienen los grupos:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+grupos_4<- cutree(CA2, k=4)
+d <- data.frame(d, grupos_4)
+
+p <- ggplot(data = d, aes(x=S1, y=S2, col=factor(grupos_4)))
+p + geom_point(shape=20, size=2) +
+  labs(color = "Clusters")
+```
+
+El resultado no es satisfactorio, ya que los puntos escalados que están cerca del origen están mucho más aglutinados que los de la derecha, por lo que los puntos de la izquierda formarán un gran grupo y el resto a la derecha formarán los tres restantes. Será buena idea representar el dendograma y deducir cuál sería el mejor $k$ para formar grupos.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+plot(CA2,cex=0.8,main='Dendograma',ylab='Distancia',xlab='Observaciones',sub='', labels = FALSE)
+abline(h=8.8,col='green')
+```
+
+He decidido, arbitrariamente, que la mejor poda del endograma sería para $k = 6$.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+g6 <- cutree(CA2, k = 6)
+
+p <- ggplot(data = d, aes(x=S1, y=S2, col=factor(g6)))
+p + geom_point(shape=factor(g6), size=2) +
+  labs(color = "Clusters")
+```
+
+Como podemos observar, el **Cluster 2** forma una gran nube de puntos entorno al origen donde se encontrarán los canales de Twitch que no destacan por su éxito ni por su compromiso con su comunidad. El **Cluster 5** se correspondería con el **Cluster 4** formado con K-means (canáles no exitosos con gran compromiso con su comunidad). Los **clusters 3 y 4** son grupos muy pequeños que comparten un éxito notable respecto a la mayoría de canales, pero que no tienen un gran compromiso con su comunidad de Twitch (se encuentran abajo a la derecha del gráfico). En el caso del **Cluster 6**, sus rasgos son parecidos a los de 3 y 4, pero en este caso también constituyen el cluster canales con gran compromiso con su comunidad. Por último, el **Cluster 1** lo forman los canales más exitosos del dataset que a su vez tienen un gran compromiso con su comunidad.
+
+**LISTADO DE STREAMERS DEL CLUSTER 1**
+
+```{r echo=FALSE}
+d1 <- cbind(d, g6)
+indices <- which(d1[, "g6"] == 1)
+d[indices, 1]
+```
+
+# Análisis Discriminante
+
+Hasta ahora hemos tratado de agrupar los canales por el valor de métricas como número de seguidores, visitas ganadas este último año, número de minutos en directo, etc. En este capítulo trataremos con aquellas variables categóricas (`Partnered`, `Mature`, `Language`) que nos pueden servir a la hora de establecer una separación de los canales en grupos.
+
+Como un rápido análisis previo vamos a usar gráficos boxplot de cada variable numérica para cada valor de la correspondiente variable categórica. Para distinguir bien el rango de valores, vamos a quitar del gráfico los valores atípicos que están muy alejados de la mediana.
+
+```{r echo=FALSE}
+lims_wtm <- c(
+  quantile(
+    ds$Watch.time.Minutes.,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_stm <- c(
+  quantile(
+    ds$Stream.time.minutes.,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_pv <- c(
+  quantile(
+    ds$Peak.viewers,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_av <- c(
+  quantile(
+    ds$Average.viewers,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_pv <- c(
+  quantile(
+    ds$Peak.viewers,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_f <- c(
+  quantile(
+    ds$Followers,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_fg <- c(
+  quantile(
+    ds$Followers.gained,
+    probs = c(0.025, 0.975)
+  )
+)
+
+lims_vg <- c(
+  quantile(
+    ds$Views.gained,
+    probs = c(0.025, 0.975)
+  )
+)
+```
+
+Primero, vamos a buscar variables que discriminen grupos en función de la variable booleana `Partnered` (para mayor comodidad usaremos las variables escaladas).
+
+```{r echo=FALSE, fig.width=10, fig.height=5}
+library(gridExtra)
+ds$Partnered <- d$Partnered
+
+p<-ggplot(ds, aes(x = Partnered))
+p1 <- p + geom_boxplot(aes(y = Watch.time.Minutes.), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_wtm)
+p2 <- p + geom_boxplot(aes(y = Stream.time.minutes.), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_stm)
+p3 <- p + geom_boxplot(aes(y = Peak.viewers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_pv)
+p4 <- p + geom_boxplot(aes(y = Average.viewers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_av) 
+p5 <- p + geom_boxplot(aes(y = Followers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_f)
+p6 <- p + geom_boxplot(aes(y = Followers.gained), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_fg)
+
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 2)
+```
+
+Parece que la que mejor podría discriminar es `Followers`.
+
+Si discriminamos por la variable `Mature`.
+
+```{r echo=FALSE, fig.width=10, fig.height=5}
+ds$Mature <- d$Mature
+
+p<-ggplot(ds, aes(x = Mature))
+p1 <- p + geom_boxplot(aes(y = Watch.time.Minutes.), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_wtm)
+p2 <- p + geom_boxplot(aes(y = Stream.time.minutes.), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_stm)
+p3 <- p + geom_boxplot(aes(y = Peak.viewers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_pv)
+p4 <- p + geom_boxplot(aes(y = Average.viewers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_av) 
+p5 <- p + geom_boxplot(aes(y = Followers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_f)
+p6 <- p + geom_boxplot(aes(y = Followers.gained), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_fg)
+
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 2)
+```
+
+Parece que no hay ninguna variable numérica que pueda discriminar bien en función de `Mature`, por lo no la vamos a utilizar esta etiqueta.
+
+Como última comprobación antes de hacer análisis discriminante, vamos a intentar agrupar por el idioma del canal. Como existen 21 valores distintos que toma la variable `Language`, vamos a quedarnos con los principales idiomas y el resto lo vamos a etiquetar como `Other_languages`.
+
+```{r echo=FALSE}
+d$Language_mod <- ifelse(d$Language %in% c("English", "Korean", 
+                                           "Russian", "Spanish"), 
+                         d$Language, "Other_languages")
+```
+
+```{r echo=FALSE, fig.width=10, fig.height=5}
+ds$Language <- d$Language_mod
+
+p<-ggplot(ds, aes(x = Language))
+p1 <- p + geom_boxplot(aes(y = Watch.time.Minutes.), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_wtm)
+p2 <- p + geom_boxplot(aes(y = Stream.time.minutes.), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_stm)
+p3 <- p + geom_boxplot(aes(y = Peak.viewers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_pv)
+p4 <- p + geom_boxplot(aes(y = Average.viewers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_av) 
+p5 <- p + geom_boxplot(aes(y = Followers), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_f)
+p6 <- p + geom_boxplot(aes(y = Followers.gained), 
+                 outlier.color = "red", outlier.shape = 1) + 
+  coord_cartesian(ylim = lims_fg)
+
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 2)
+```
+
+Vemos como usando estos grupos la separabilidad es mucho mayor. Podemos sacar conclusiones como que los canales coreanos son los que tienen `Peak.viewers` más bajo o que los canales cuyo idioma es el español son los que más seguidores ganaron (`Followers.gained`).
+
+## Análisis Discriminante Cuadrático (QDA)
+
+En el análisis previo dijimos que las variables numéricas poseían valores en rangos muy distintos, por lo que llegamos a suponer que las varianzas teóricas serían distintas. Por este motivo no vamos a emplear el LDA (no vamos a obtener resultados muy satisfactorios).
+
+En su lugar, vamos a hacer análisis discriminante cuadrático (QDA) bajo la suposición de normalidad de las variables. Lo haremos mediante validación cruzada.
+
+```{r echo=FALSE, message=FALSE}
+library('MASS')
+d1 <- d[d$Language %in% c("English", "Korean", "Russian", "Spanish"), ]
+QDACV<-qda(d1[,2:7],d1$Language, CV=TRUE)
+mat_conf <- addmargins(table(d1$Language, QDACV$class))
+
+knitr::kable(mat_conf, caption = "Matriz de confusión")
+exactitud <- sum(diag(mat_conf)) / sum(mat_conf)
+```
+
+Con probabilidad de acierto igual a `r exactitud` concluimos que hemos obtenido un mal modelo. Es posible que nuestra suposición de normalidad de las variables no sea la más pertinente en este caso. Por ello, haremos un test de normalidad multivariante para averiguar si esta suposición es acertada o no.
+
+```{r echo=FALSE}
+library('mvnormtest')
+p_valor <- mshapiro.test(t(d[, 2:7]))$p.value
+```
+
+Con un p-valor igual a `r p_valor` (muy bajo) y a un nivel de significación $\alpha = 0.01$ descartamos la suposición de la normalidad multivariante de las variables. En este sentido, parece que las condiciones en las que se encuentran los datos no parecen las óptimas para aplicar técnicas de análisis discriminante.
+
+# Regresión Lineal Múltiple
+
+Hasta el momento, la única variable que no hemos empleado para ningún estudio estadístico ha sido `Views.gained` (visitas ganadas en 2020). El objetivo en este apartado será averiguar cuáles son las variables que influyen principalmente en el número de visitas ganadas ese año y proveer una ecuación que modelice la relación en aras de realizar predicciones a partir de nuevos datos de las variables predictoras. Por ende, `Views.gained` será el objetivo de la regresión y el resto de variables numéricas (las tratadas en las técnicas de clasificación) serán los predictores del modelo.
+
+A continuación, mostramos gráficos de caja bigotes con las variables escaladas.
+
+```{r echo=FALSE, fig.height=4, fig.width=7}
+boxplot(scale(df[,c(2:4)]))
+boxplot(scale(df[,c(5:7)]))
+boxplot(scale(df[,c(8)]))
+
+```
+
+```{r echo=FALSE, fig.height=3.5, fig.width=6}
+y <- df$`Views gained`
+
+y_outlier <- df[which.max(y), 1]
+
+p <- ggplot(data = df, aes(y = `Views gained`))
+p +
+  geom_point(aes(x = 1:1000), shape=20) +
+  geom_point(aes(x = which.max(`Views gained`),
+                 y = max(`Views gained`)),
+             col = 'red') +
+  labs(x = "Index") 
+
+```
+
+Como podemos observar en el anterior gráfico, hay un valor atípico, el cual se aleja significativamente de los demás, que puede causar problemas al aplicar técnicas de regresión. Se trata del canal nº `r which.max(y)` (`r y_outlier`).
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+plot(df[,c(2:8)], main = 'Con atípicos')
+```
+
+Ya vimos en el análisis previo que no existe aparentemente gran correlación entre ningún par de variables. En los gráficos con atípicos se puede apreciar claramente la observación atípica de la fila 8.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+# Pruebas de normalidad de la variable respuesta
+shapiro.test(df$`Views gained`)
+qqnorm(df$`Views gained`)
+qqline(df$`Views gained`, col = 'red')
+
+```
+
+Vemos que la hipótesis de normalidad queda totalmente rechazada para estos datos, pues obtenemos un p-valor significativamente bajo y el gráfico muestra como algunos cuantiles muestrales se alejan completamente.
+
+Es posible (dada la exponencialidad de los datos) que la variable siga una distribución log-normal, por lo que tendremos que tomar el logaritmo de los datos.
+
+## Tranformaciones de los datos
+
+Puesto que no hay indicios de normalidad en los datos vamos a probar a transformarlos. Para ello, vamos a comprobar si esa mejor transformación podría ser tomar logaritmos.
+
+```{r}
+library("MASS")
+datos <- data.frame(df[,c(2:8)])
+
+```
+
+```{r}
+boxcox(lm(Views.gained ~ 1, data = datos), lambda = seq(-2, 2, 1/10))
+```
+
+La máxima verosimilitud se alcanza cerca de $\lambda = 0$, tomaremos logaritmos.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+shapiro.test(log(datos$Views.gained))
+qqnorm(log(datos$Views.gained))
+qqline(log(datos$Views.gained), col = 'red')
+```
+
+Vemos que hay dos valores de los cuantiles muestrales (uno en cada extremo) que se alejan demasiado. Decidimos eliminarlos y buscar el mejor $\lambda$ para transformar los datos.
+
+```{r}
+datos<-datos[-which.min(datos$Views.gained),]
+datos<-datos[-which.max(datos$Views.gained),]
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+boxcox(lm(log(Views.gained) ~ 1, data = datos), lambda = seq(-5, -1, 1/10))
+```
+
+Como podemos observar, la máxima verosimilitud se alcanza entorno a $\lambda = -3$. Elevamos a ese valor y comprobamos si podemos aceptar la hipótesis de log-normalidad.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+p.valor<-shapiro.test(log(datos$Views.gained) ^ (-3))$p.value
+qqnorm(log(datos$Views.gained) ^ (-3))
+qqline(log(datos$Views.gained) ^ (-3), col = 'red')
+```
+
+Tras realizar el test de Shapiro-Wilk el p-valor da `r p.valor`. A un nivel de significación $\alpha=0.05$ aceptamos la hipótesis de log-normalidad de la variable `Views.gained`
+
+```{r include=FALSE}
+datos$Y_new <- log(datos$Views.gained) ^ (-3)
+```
+
+## Estimación de los parámetros del modelo RLM y métodos de selección de regresores
+
+Empezamos realizando una estimación de los parámetros del **modelo RLM usando todos los predictores**.
+
+```{r echo=FALSE}
+modelo_completo <- lm(Y_new ~ . - Views.gained ,
+                      data = datos)
+
+summary(modelo_completo)
+```
+
+El R-cuadrado ajustado tan bajo nos indica que no se ha conseguido un buen ajuste. En el contraste de si los coeficientes de los regresores son significativos encontramos un p-valor alto, lo que indica que el modelo es reducible. Para reducir el modelo aplicaremos el **método de selección de regresores backward**.
+
+```{r echo=FALSE}
+modelo_backward <- step(modelo_completo, direction = "backward")
+```
+
+Observamos que primero se elimina la variable `Followers.gained` (la que mayor p-valor tenía) y después quita `Stream.time.minutes.`, quedándose con 4 variables (`Average.viewers`, `Peak.viewers`, `Followers` y `Watch.time.Minutes`). Los coeficientes serían:
+
+```{r}
+modelo_backward$coefficients
+```
+
+Una vez probado el modelo backward, probaremos con el modelo forward partiendo solo con la constante para ir añadiendo nuevas variables.
+
+```{r}
+modelo_cte <- lm(Y_new ~1, data = datos)
+
+modelo_forward <- step(modelo_cte, direction = "forward",
+                       scope = formula(modelo_completo))
+```
+
+```{r}
+modelo_forward$coefficients
+```
+
+Observamos que se obtiene el mismo modelo con cuatro variables que se obtuvo con el método backward. Por último, probaremos con el método stepwise, que va añadiendo y quitando variables al modelo.
+
+```{r}
+modelo_stepwise <- step(modelo_cte, direction = "both",
+                        scope = formula(modelo_completo))
+```
+
+```{r}
+modelo_stepwise$coefficients
+```
+
+En esta ocasión, a través de los tres métodos se ha llegado al mismo modelo.
+
+```{r}
+modelo_final <- modelo_backward
+summary(modelo_final)
+```
+
+Observamos que el R-cuadrado sigue siendo muy bajo ($0.3571$), es decir solo explica el 35.7 % de la información. Al igual que pasaba con `Views.gained`, es posible que sea necesario tomar los logaritmos de los regresores dada la exponencialidad de los datos.
+
+```{r}
+datos[,c(1:6)] <- log(datos[,c(1:6)])
+
+modelo_log_completo <- lm(Y_new ~ . - Views.gained ,
+                      data = datos)
+
+summary(modelo_log_completo)
+```
+
+Parece que esta transformación de los datos ha mejorado significativamente el modelo.
+
+```{r}
+modelo_log_final <- step(modelo_completo, direction = "backward")
+```
+
+## Validación del modelo
+
+Para poder hacer inferencia y predicciones sobre los datos tendremos que validar nuestro modelo.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+# 1) Hipótesis de Normalidad
+residuos <- modelo_log_final$residuals
+shapiro.test(residuos)
+qqnorm(modelo_log_final$residuals)
+qqline(modelo_log_final$residuals, col='red')
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+plot(modelo_log_final$residuals)
+```
+
+No se cumple la normalidad de los residuos.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+# 2) Hipótesis de Homocedasticidad
+plot(modelo_log_final$fitted.values, modelo_log_final$residuals)
+```
+
+La varianza de los residuos aumenta según aumenta el valor que predice el modelo. No se cumple la propiedad de homocedasticidad.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+# 3) Hipótesis de Independencia
+ts.plot(modelo_log_final$residuals)
+library("lmtest")
+dwtest(modelo_log_final, alternative="two.sided")
+```
+
+Como el p-valor del contraste Durbin-Watson es significativamente alto (superior a 0.10), podemos suponer independencia.
+
+Seguidamente, comprobaremos que no hay multicolinealidad.
+
+```{r include=FALSE}
+# Comprobamos que no hay multicolinealidad en el modelo 
+# final calculando los VIFs
+
+library("rms")
+
+```
+```{r}
+vif(modelo_log_final)
+```
+
+
+Por último, calcularemos las distancias de Cook para asegurar que no hay una observación influyente.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+cook <- cooks.distance(modelo_log_final)
+plot(cook)
+
+```
+
+Hemos visto que nuestro modelo no pasa el test de normalidad y tampoco el de homocedasticidad. Para solucionarlo, vamos a hacer transformaciones en las variables predictoras de nuestro modelo y vamos a eliminar los datos con residuos más significativos.
+
+Para encontrar la transformación más pertinente de los predictores, usamos la función `boxcox()`.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+
+boxcox(lm(Watch.time.Minutes. ~ 1, data = datos), lambda = seq(-20, -10, 1/10))
+
+boxcox(lm(Peak.viewers ~ 1, data = datos), lambda = seq(-2, 1, 1/10))
+
+boxcox(lm(Average.viewers ~ 1, data = datos), lambda = seq(-3, 1, 1/10))
+```
+
+Observamos que las mejores transformaciones que se obtienen son:
+
+-   Para `Watch.time.Minutes.` : $\lambda = -14$ (aproximadamente)
+
+-   Para `Peak.viewers` : $\lambda = -1/2$ (aproximadamente)
+
+-   Para `Average.viewers` : $\lambda = -1$ (aproximadamente)
+
+```{r}
+modelo_log_final <- lm(Y_new ~ I(Watch.time.Minutes. ^ (-14)) +
+                                   I(Peak.viewers ^ (-0.5)) +
+                                   I(Average.viewers ^ (-1)),
+                       data = datos)
+
+summary(modelo_log_final)
+```
+
+Volvemos a representar el gráfico de cuantiles, para identificar visualmente donde se encuentran los mayores residuos.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+qqnorm(modelo_log_final$residuals)
+qqline(modelo_log_final$residuals, col='red')
+```
+
+El gráfico de cuantiles tras eliminar estas observaciones (que generan estos residuos tan grandes) queda así.
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+datos$sq <- qqnorm(modelo_log_final$residuals, plot.it = FALSE)$y
+
+datos <- datos[order(datos$sq, decreasing = TRUE), ]
+datos <- datos[-c(987:998), ] 
+datos <- datos[-c(1:5), ]
+datos <- datos[-c(2:6), ]
+datos <- datos[-c(7,8), ]
+
+modelo_log_final <- lm(Y_new ~ I(Watch.time.Minutes. ^ (-14)) +
+                                   I(Peak.viewers ^ (-0.5)) +
+                                   I(Average.viewers ^ (-1)),
+                       data = datos)
+
+qqnorm(modelo_log_final$residuals)
+qqline(modelo_log_final$residuals, col='red')
+```
+
+```{r}
+residuos <- modelo_log_final$residuals
+p.valor <- shapiro.test(residuos)$p.value
+```
+
+Obteniendo un p-valor de `r p.valor` y a un nivel de significación $\alpha = 0.05$ aceptamos la hipótesis de normalidad de los residuos.
+
+Respecto a la suposición homocedasticidad, tenemos el siguiente resultado tras los pasos realizados:
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+plot(modelo_log_final$fitted.values, modelo_log_final$residuals)
+```
+
+La dispersión de los residuos respecto a 0 es más contaste que antes, por lo que podríamos decir que ahora también se cumple la hipótesis de homocedasticidad. En definitiva, nuestro modelo ya estaría validado y listo para hacer inferencias con él.
+
+## Inferencias en el modelo RLM
+
+Las inferencias que vamos a realizar consisten en la obtención de intervalos de confianza para los parámetros de regresión, intervalo de confianza para la media de la variable respuesta `Y_new` (la transformación de `Views.gained`) y los intervalos de predicción para la respuesta.
+
+```{r echo=FALSE}
+int_conf_predictores <- confint(modelo_log_final, level = 0.95)
+knitr::kable(int_conf_predictores, caption = "Intervalos de confianza predictores")
+```
+
+Por tanto, cualquier modelo teórico con coeficientes dentro de los intervalos dados serían válidos teniendo en cuenta los datos muestrales.
+
+Posteriormente, haremos el intervalo de confianza para la media de la variable respuesta y el intervalo de predicción para la respuesta (al 95%). Por ejemplo, empleamos los valores $log(Watch.time.Minutes.) = 19.5624$, $log(Peak.viewers) = 9.3792$ y $log(Average.viewers) = 7.6161$.
+
+```{r echo=FALSE}
+nuevos <- data.frame(Watch.time.Minutes. = 19.5624,
+                     Peak.viewers = 9.3792,
+                     Average.viewers = 7.6161)
+int_conf_y <- predict(modelo_log_final, newdata = nuevos, interval = "confidence", level = 0.95)
+knitr::kable(int_conf_y, caption = "Intervalo de confianza y (95%)")
+```
+
+```{r echo=FALSE}
+int_pred_y <- predict(modelo_log_final, newdata = nuevos, interval = "prediction", level = 0.95)
+nuevos <- nuevos %>% mutate("prediccion" = int_pred_y[1])
+knitr::kable(int_pred_y, caption = "Intervalo de predicción y (95%)")
+```
+
+Consecuentemente, podemos decir que el valor esperado para `Y_new` (cuando el canal tiene esos valores de los logaritmos de `Watch.time.Minutes.`, `Peak.viewers` y `Average.viewers`) estaría entre `r int_conf_y[2]` y `r int_conf_y[3]`, y su predicción entre `r int_pred_y[2]` y `r int_pred_y[3]`, con una confianza del 95%. El valor que devolvería el modelo ante dicha entrada sería de `r int_pred_y[1]` para `Y_new`. Sin embargo, nos interesaría más saber el valor de la variable original `Views.gained`, por lo que sería tan simple como hacer la transformación inversa de la variable aplicando $e^{Y^{-1/3}}$, por lo que las visitas ganadas por ese canal durante el año 2020 serían `r exp(int_pred_y[1]^(-1/3))`. A continuación, las gráficas donde aparece la predicción de nuestro modelo ante esta observación.
+
+*NOTA: Las curvas trazadas en las gráficas no pertenecen al modelo, sino a la trazada con el comando `geom_smooth()` con el método LOESS*
+
+```{r echo=FALSE, fig.height=3.5, fig.width=6, message=FALSE}
+library(ggplot2)  
+library(dplyr)
+
+datos %>%
+  ggplot(aes(x = Peak.viewers, y = Views.gained)) +
+  geom_point(shape= 20) +
+  geom_smooth() +
+  geom_point(data = nuevos, aes(x=Peak.viewers, y=exp(prediccion^(-1/3))), 
+             col='red', shape = 20, size = 3.5) 
+  
+
+datos %>%
+  ggplot(aes(x = Watch.time.Minutes., y = Views.gained)) +
+  geom_point(shape= 20) +
+  geom_smooth() +
+  geom_point(data = nuevos, aes(x=Watch.time.Minutes., y=exp(prediccion^(-1/3))), 
+             col='red', shape = 20, size = 3.5) 
+
+datos %>% 
+  ggplot(aes(x = Average.viewers, y = Views.gained)) +
+  geom_point(shape= 20) +
+  geom_smooth() +
+  geom_point(data = nuevos, aes(x=Average.viewers, y=exp(prediccion^(-1/3))), 
+             col='red', shape = 20, size = 3.5) 
+
+```
+
+# Conclusiones
+
+Para finalizar, recopilaremos las conclusiones a las que hemos llegado a lo largo de este informe.
+
+-   En primer lugar, los streamers hispanos fueron los que relativamente más crecieron en número de seguidores a lo largo de este periodo pandémico.
+
+-   En segundo lugar, los canales que llevan mucho tiempo acumulado retransmitiendo son más propensos a obtener peores valores en características como la media de espectadores en un directo o los seguidores ganados.
+
+-   Además, hemos podido establecer agrupaciones mediante técnicas de aprendizaje no supervisado (como K-means) en las que con el uso de PCA hemos podido catalogar distintos canales por su éxito en la plataforma y su compromiso con su respectiva comunidad.
+
+-   Por otra parte, a pesar de contar con distintas variables categóricas, no se ha podido aplicar técnicas de aprendizaje supervisado como análisis discriminante o el uso de la regresión logística para clasificar, debido a que la cantidad de observaciones de cada clase estaba bastante descompensada en algunos casos.
+
+-   Con la regresión multinomial, hemos podido trazar una curva que explica la tendencia de los datos de la variable respuesta (`Views.gained`) ante la variación de los valores de sus predictores. Para ello, se ha hecho una selección de caractarísticas empleando distintos métodos y se ha concluido que los factores que más afectan a las visitas ganadas son el pico de viewers de los canales (lógico que cuanto más alto sea el pico más visitas nuevas se produzcan), las horas que lleva retransmitiendo el canal (porque cuanto más tiempo más probable es recibir nuevas visitas) y la media de espectadores en un directo. La eliminación de datos residuales junto a la transformación de las variables han permitido hallar una tendencia de los datos mucho más significativa respecto al estado inicial en el que se encontraban los datos.
+
+En definitiva, se ha conseguido información sumamente concluyente de como fue este año para los canales de Twitch aplicando técnicas de análisis multivariante.
